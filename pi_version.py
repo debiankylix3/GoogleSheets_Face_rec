@@ -3,7 +3,6 @@ import gspread
 import requests
 import face_recognition
 import pickle
-import cv2
 import sqlite3
 import numpy as np
 from google.oauth2.service_account import Credentials
@@ -65,9 +64,15 @@ def download_image(image_url, save_path):
     print(f"Failed to download image from {image_url}")
     return False
 
+def user_exists_in_db(name):
+    """Check if a user already exists in the database by name."""
+    cursor.execute("SELECT 1 FROM users WHERE name = ?", (name,))
+    return cursor.fetchone() is not None
+
 def process_google_sheet():
-    """Fetch and process Google Sheets data, save images locally, and populate database."""
+    """Fetch and process only new Google Sheets data, save images locally, and populate database."""
     data = worksheet.get_all_records()
+
     for row in data:
         name = row.get('Nama (Nama depan saja)', 'Unknown')
         makanan = row.get('Makanan', 'Unknown')
@@ -77,25 +82,25 @@ def process_google_sheet():
             print(f"Skipping {name} due to missing image.")
             continue
 
-        # Generate unique filename
+        if user_exists_in_db(name):
+            print(f"User {name} already exists in the database. Skipping...")
+            continue
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         image_filename = f"{name}_{timestamp}.jpg"
         save_path = os.path.join(SAVE_DIR, image_filename)
 
-        # Download and save the image locally
         if download_image(image_url, save_path):
-            # Encode the face and save to database
-            image = cv2.imread(save_path)
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            boxes = face_recognition.face_locations(rgb, model="hog")
-            encodings = face_recognition.face_encodings(rgb, boxes)
+            image = face_recognition.load_image_file(save_path)
+            boxes = face_recognition.face_locations(image, model="hog")
+            encodings = face_recognition.face_encodings(image, boxes)
 
             if encodings:
                 encoding = encodings[0]
                 cursor.execute('INSERT INTO users (name, makanan, encoding) VALUES (?, ?, ?)',
                                (name, makanan, pickle.dumps(encoding)))
                 conn.commit()
-                print(f"Data for {name} saved to database.")
+                print(f"Data for {name} saved to the database.")
             else:
                 print(f"No face detected in {name}'s image.")
 
@@ -119,18 +124,18 @@ def recognize_and_order_from_db():
         known_face_names.append(name)
         known_face_orders[name] = makanan
 
-    print("Processing orders based on database data...")
+    print("Starting face recognition...")
     picam2 = Picamera2()
-    picam2.configure(picam2.create_preview_configuration(main={"size": (640, 480)}))
+    config = picam2.create_preview_configuration(main={"size": (640, 480)})
+    picam2.configure(config)
     picam2.start()
-    sleep(2)  # Allow the camera to warm up
+    sleep(2)
 
     try:
         while True:
             frame = picam2.capture_array()
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            face_locations = face_recognition.face_locations(rgb_frame)
-            face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+            face_locations = face_recognition.face_locations(frame)
+            face_encodings = face_recognition.face_encodings(frame, face_locations)
 
             for face_encoding in face_encodings:
                 matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
@@ -144,9 +149,8 @@ def recognize_and_order_from_db():
                     return
                 else:
                     print("Face not recognized. Please register first.")
-
     except KeyboardInterrupt:
-        print("\nExiting...")
+        print("Exiting...")
     finally:
         picam2.stop()
 
@@ -159,7 +163,6 @@ if __name__ == "__main__":
 
         choice = input("Select an option: ")
         if choice == "1":
-            print("Fetching data from Google Sheets and populating database...")
             process_google_sheet()
         elif choice == "2":
             recognize_and_order_from_db()
